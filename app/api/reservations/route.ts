@@ -1,11 +1,34 @@
 import { listReservedSlots, releaseSlots, reserveSlots } from '@/db/reservations';
 
 const TIME_ZONE = 'Europe/Berlin';
+const GITHUB_PAGES_ORIGIN = 'https://drag0sh7.github.io';
 const OPEN_SLOTS = new Set([
   0,
   1,
   ...Array.from({ length: 38 }, (_, index) => index + 10),
 ]);
+
+function json(data: unknown, init?: ResponseInit) {
+  const response = Response.json(data, init);
+  response.headers.set('Access-Control-Allow-Origin', GITHUB_PAGES_ORIGIN);
+  response.headers.set('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  response.headers.set('Access-Control-Allow-Headers', 'Content-Type');
+  response.headers.set('Vary', 'Origin');
+  return response;
+}
+
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': GITHUB_PAGES_ORIGIN,
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Max-Age': '86400',
+      Vary: 'Origin',
+    },
+  });
+}
 
 function berlinParts(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -44,43 +67,43 @@ export async function GET(request: Request) {
   const date = url.searchParams.get('date') ?? '';
   const { today, tomorrow, currentSlot } = bookableWindow();
   if (!dateIsBookable(date, today, tomorrow)) {
-    return Response.json({ error: 'Choose today or tomorrow.' }, { status: 400 });
+    return json({ error: 'Choose today or tomorrow.' }, { status: 400 });
   }
   const reservedSlots = await listReservedSlots(date, today);
-  return Response.json({ reservedSlots, today, tomorrow, currentSlot: date === today ? currentSlot : 0 });
+  return json({ reservedSlots, today, tomorrow, currentSlot: date === today ? currentSlot : 0 });
 }
 
 export async function POST(request: Request) {
   const contentType = request.headers.get('content-type') ?? '';
   if (!contentType.includes('application/json')) {
-    return Response.json({ error: 'Invalid request.' }, { status: 415 });
+    return json({ error: 'Invalid request.' }, { status: 415 });
   }
   const body = (await request.json().catch(() => null)) as { date?: unknown; slots?: unknown } | null;
   const date = typeof body?.date === 'string' ? body.date : '';
   const slots = Array.isArray(body?.slots) ? body.slots.map(Number) : [];
   const { today, tomorrow, currentSlot } = bookableWindow();
   if (!dateIsBookable(date, today, tomorrow) || !slotsAreValid(slots, date, today, currentSlot)) {
-    return Response.json({ error: 'That time is not available for booking.' }, { status: 400 });
+    return json({ error: 'That time is not available for booking.' }, { status: 400 });
   }
   const created = await reserveSlots(date, slots);
   if (!created) {
-    return Response.json({ error: 'Part of that time was just reserved. Please choose another.' }, { status: 409 });
+    return json({ error: 'Part of that time was just reserved. Please choose another.' }, { status: 409 });
   }
-  return Response.json({ ok: true }, { status: 201 });
+  return json({ ok: true }, { status: 201 });
 }
 
 export async function DELETE(request: Request) {
   const contentType = request.headers.get('content-type') ?? '';
   if (!contentType.includes('application/json')) {
-    return Response.json({ error: 'Invalid request.' }, { status: 415 });
+    return json({ error: 'Invalid request.' }, { status: 415 });
   }
   const body = (await request.json().catch(() => null)) as { date?: unknown; slots?: unknown } | null;
   const date = typeof body?.date === 'string' ? body.date : '';
   const slots = Array.isArray(body?.slots) ? body.slots.map(Number) : [];
   const { today, tomorrow, currentSlot } = bookableWindow();
   if (!dateIsBookable(date, today, tomorrow) || !slotsAreValid(slots, date, today, currentSlot, true)) {
-    return Response.json({ error: 'That time cannot be released.' }, { status: 400 });
+    return json({ error: 'That time cannot be released.' }, { status: 400 });
   }
   await releaseSlots(date, slots);
-  return Response.json({ ok: true });
+  return json({ ok: true });
 }

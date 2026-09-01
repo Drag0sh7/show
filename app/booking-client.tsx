@@ -23,7 +23,7 @@ function dateLabel(date: string, fallback: string) {
   return new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric', month: 'short' }).format(parsed);
 }
 
-export function BookingClient({ initialToday, initialTomorrow }: { initialToday: string; initialTomorrow: string }) {
+export function BookingClient({ initialToday, initialTomorrow, apiBase = '' }: { initialToday: string; initialTomorrow: string; apiBase?: string }) {
   const [date, setDate] = useState(initialToday);
   const [availability, setAvailability] = useState<Availability>({ reservedSlots: [], today: initialToday, tomorrow: initialTomorrow, currentSlot: 0 });
   const [selection, setSelection] = useState<{ start: number; end: number; mode: 'reserve' | 'release' } | null>(null);
@@ -42,7 +42,7 @@ export function BookingClient({ initialToday, initialTomorrow }: { initialToday:
     setLoading(true);
     if (!keepMessage) setMessage('');
     try {
-      const response = await fetch(`/api/reservations?date=${encodeURIComponent(targetDate)}`, { cache: 'no-store' });
+      const response = await fetch(`${apiBase}/api/reservations?date=${encodeURIComponent(targetDate)}`, { cache: 'no-store' });
       const data = (await response.json()) as Availability & { error?: string };
       if (!response.ok) throw new Error(data.error ?? 'could not load. awkward.');
       setAvailability(data);
@@ -91,7 +91,7 @@ export function BookingClient({ initialToday, initialTomorrow }: { initialToday:
     setSaving(true);
     setMessage('');
     try {
-      const response = await fetch('/api/reservations', {
+      const response = await fetch(`${apiBase}/api/reservations`, {
         method: selection.mode === 'release' ? 'DELETE' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ date, slots: selectedSlots }),
