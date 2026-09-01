@@ -10,3 +10,13 @@ export const reservations = sqliteTable(
   },
   (table) => [primaryKey({ columns: [table.bookingDate, table.slot] })],
 );
+
+export const reservationMinutes = sqliteTable(
+  'reservation_minutes',
+  {
+    bookingDate: text('booking_date').notNull(),
+    minute: integer('minute').notNull(),
+    createdAt: text('created_at').notNull().default(sql`(datetime('now'))`),
+  },
+  (table) => [primaryKey({ columns: [table.bookingDate, table.minute] })],
+);

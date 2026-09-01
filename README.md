@@ -1,6 +1,6 @@
 # Reservations
 
-Anonymous shared room reservations in 30-minute increments for today and tomorrow.
+Anonymous shared room reservations with minute-precise intervals for today and tomorrow.
 
 ## Development
 

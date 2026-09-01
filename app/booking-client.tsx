@@ -1,20 +1,36 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowRight, Check, Loader2, RefreshCw, X } from 'lucide-react';
+import type { PointerEvent as ReactPointerEvent } from 'react';
+import { ArrowRight, Loader2, RefreshCw } from 'lucide-react';
 
-const OPEN_SLOTS = [0, 1, ...Array.from({ length: 38 }, (_, index) => index + 10)];
-
+type ReservedInterval = { start: number; end: number };
+type Selection = ReservedInterval;
 type Availability = {
-  reservedSlots: number[];
+  reservedIntervals: ReservedInterval[];
   today: string;
   tomorrow: string;
-  currentSlot: number;
+  currentMinute: number;
 };
 
-function slotTime(slot: number) {
-  if (slot === 48) return '24:00';
-  return `${String(Math.floor(slot / 2)).padStart(2, '0')}:${slot % 2 ? '30' : '00'}`;
+const OPEN_PERIODS = [
+  { start: 0, end: 60, ticks: [0, 60] },
+  { start: 300, end: 1440, ticks: [300, 480, 660, 840, 1020, 1200, 1380, 1440] },
+];
+
+function minuteTime(minute: number) {
+  if (minute === 1440) return '24:00';
+  return `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
+}
+
+function inputTime(minute: number) {
+  return minute === 1440 ? '00:00' : minuteTime(minute);
+}
+
+function parsedTime(value: string) {
+  const [hour, minute] = value.split(':').map(Number);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
+  return hour * 60 + minute;
 }
 
 function dateLabel(date: string, fallback: string) {
@@ -23,20 +39,34 @@ function dateLabel(date: string, fallback: string) {
   return new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric', month: 'short' }).format(parsed);
 }
 
+function openPeriod(start: number, end = start + 1) {
+  return OPEN_PERIODS.find((period) => start >= period.start && end <= period.end);
+}
+
+function durationLabel(minutes: number) {
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (!hours) return `${rest}m`;
+  return rest ? `${hours}h ${rest}m` : `${hours}h`;
+}
+
 export function BookingClient({ initialToday, initialTomorrow, apiBase = '' }: { initialToday: string; initialTomorrow: string; apiBase?: string }) {
   const [date, setDate] = useState(initialToday);
-  const [availability, setAvailability] = useState<Availability>({ reservedSlots: [], today: initialToday, tomorrow: initialTomorrow, currentSlot: 0 });
-  const [selection, setSelection] = useState<{ start: number; end: number; mode: 'reserve' | 'release' } | null>(null);
+  const [availability, setAvailability] = useState<Availability>({ reservedIntervals: [], today: initialToday, tomorrow: initialTomorrow, currentMinute: 0 });
+  const [selection, setSelection] = useState<Selection | null>(null);
+  const [dragStart, setDragStart] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
 
-  const reserved = useMemo(() => new Set(availability.reservedSlots), [availability.reservedSlots]);
-  const selectedSlots = useMemo(() => {
-    if (!selection) return [];
-    return Array.from({ length: selection.end - selection.start + 1 }, (_, index) => selection.start + index);
-  }, [selection]);
-  const selected = useMemo(() => new Set(selectedSlots), [selectedSlots]);
+  const selectionState = useMemo(() => {
+    if (!selection) return { mode: null as 'reserve' | 'release' | null, valid: false };
+    const containing = availability.reservedIntervals.find((item) => selection.start >= item.start && selection.end <= item.end);
+    if (containing) return { mode: 'release' as const, valid: true };
+    const overlaps = availability.reservedIntervals.some((item) => selection.start < item.end && selection.end > item.start);
+    const past = date === availability.today && selection.start < availability.currentMinute;
+    return { mode: 'reserve' as const, valid: !overlaps && !past && Boolean(openPeriod(selection.start, selection.end)) };
+  }, [availability, date, selection]);
 
   async function loadAvailability(targetDate = date, keepMessage = false) {
     setLoading(true);
@@ -55,51 +85,81 @@ export function BookingClient({ initialToday, initialTomorrow, apiBase = '' }: {
 
   useEffect(() => { void loadAvailability(date); }, [date]);
 
-  function isPast(slot: number) {
-    return date === availability.today && slot < availability.currentSlot;
+  function minuteFromPointer(event: ReactPointerEvent<HTMLDivElement>, period: (typeof OPEN_PERIODS)[number]) {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
+    return Math.round(period.start + ratio * (period.end - period.start));
   }
 
-  function chooseSlot(slot: number) {
-    const mode = reserved.has(slot) ? 'release' : 'reserve';
-    if (mode === 'reserve' && isPast(slot)) return;
+  function startAxisSelection(event: ReactPointerEvent<HTMLDivElement>, period: (typeof OPEN_PERIODS)[number]) {
+    const pointedMinute = Math.min(period.end - 1, minuteFromPointer(event, period));
+    const reservedInterval = availability.reservedIntervals.find((item) => pointedMinute >= item.start && pointedMinute < item.end);
     setMessage('');
-    if (!selection) {
-      setSelection({ start: slot, end: slot, mode });
+    if (reservedInterval) {
+      setSelection({ ...reservedInterval });
+      setDragStart(null);
       return;
     }
-    if (selection.start === slot && selection.end === slot) {
-      setSelection(null);
+    if (date === availability.today && pointedMinute < availability.currentMinute) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragStart(pointedMinute);
+    setSelection({ start: pointedMinute, end: pointedMinute + 1 });
+  }
+
+  function moveAxisSelection(event: ReactPointerEvent<HTMLDivElement>, period: (typeof OPEN_PERIODS)[number]) {
+    if (dragStart === null) return;
+    const pointedMinute = minuteFromPointer(event, period);
+    if (pointedMinute >= dragStart) {
+      setSelection({ start: dragStart, end: Math.min(period.end, Math.max(dragStart + 1, pointedMinute)) });
+    } else {
+      setSelection({ start: Math.max(period.start, pointedMinute), end: dragStart + 1 });
+    }
+  }
+
+  function finishAxisSelection(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    setDragStart(null);
+  }
+
+  function changeStart(value: string) {
+    const start = parsedTime(value);
+    if (start === null) return;
+    const period = OPEN_PERIODS.find((item) => start >= item.start && start < item.end);
+    if (!period) {
+      setMessage('not available.');
       return;
     }
-    const start = Math.min(selection.start, slot);
-    const end = Math.max(selection.start, slot);
-    const range = Array.from({ length: end - start + 1 }, (_, index) => start + index);
-    const rangeMatchesMode = selection.mode === mode && range.every((item) => {
-      if (!OPEN_SLOTS.includes(item)) return false;
-      return mode === 'release' ? reserved.has(item) : !reserved.has(item) && !isPast(item);
-    });
-    if (!rangeMatchesMode) {
-      setSelection({ start: slot, end: slot, mode });
-      setMessage(mode === 'release' ? 'picked one reserved slot.' : 'picked a new start.');
+    const end = selection && selection.end > start && selection.end <= period.end ? selection.end : Math.min(period.end, start + 30);
+    setSelection({ start, end });
+    setMessage('');
+  }
+
+  function changeEnd(value: string) {
+    if (!selection) return;
+    let end = parsedTime(value);
+    if (end === 0 && selection.start >= 300) end = 1440;
+    if (end === null || end <= selection.start || !openPeriod(selection.start, end)) {
+      setMessage('not available.');
       return;
     }
-    setSelection({ start, end, mode });
+    setSelection({ ...selection, end });
+    setMessage('');
   }
 
   async function submitReservation() {
-    if (!selection || saving) return;
+    if (!selection || !selectionState.valid || !selectionState.mode || saving) return;
     setSaving(true);
     setMessage('');
     try {
       const response = await fetch(`${apiBase}/api/reservations`, {
-        method: selection.mode === 'release' ? 'DELETE' : 'POST',
+        method: selectionState.mode === 'release' ? 'DELETE' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date, slots: selectedSlots }),
+        body: JSON.stringify({ date, start: selection.start, end: selection.end }),
       });
       const data = (await response.json()) as { ok?: boolean; error?: string };
-      if (!response.ok) throw new Error(data.error ?? (selection.mode === 'release' ? 'did not release.' : 'did not book.'));
-      const label = `${slotTime(selection.start)}–${slotTime(selection.end + 1)}`;
-      const completedMode = selection.mode;
+      if (!response.ok) throw new Error(data.error ?? 'that did not work.');
+      const label = `${minuteTime(selection.start)}–${minuteTime(selection.end)}`;
+      const completedMode = selectionState.mode;
       setSelection(null);
       setMessage(`${label}. ${completedMode === 'release' ? 'released.' : 'booked.'}`);
       await loadAvailability(date, true);
@@ -110,9 +170,6 @@ export function BookingClient({ initialToday, initialTomorrow, apiBase = '' }: {
       setSaving(false);
     }
   }
-
-  const durationMinutes = selectedSlots.length * 30;
-  const durationLabel = durationMinutes < 60 ? '30m' : `${durationMinutes / 60 % 1 ? (durationMinutes / 60).toFixed(1) : durationMinutes / 60}h`;
 
   return (
     <section id="booking" aria-label="Reservation times" className="overflow-hidden rounded-2xl border border-border bg-card">
@@ -138,46 +195,81 @@ export function BookingClient({ initialToday, initialTomorrow, apiBase = '' }: {
 
       <div className="p-3 sm:p-4">
         {loading ? (
-          <div className="grid min-h-80 place-items-center text-xs text-muted-foreground" role="status">
+          <div className="grid min-h-72 place-items-center text-xs text-muted-foreground" role="status">
             <span className="sr-only">Loading availability</span>
             <Loader2 className="size-4 animate-spin" aria-hidden="true" />
           </div>
         ) : (
-          <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-8 sm:gap-2" role="group" aria-label="Available reservation times">
-            {OPEN_SLOTS.map((slot) => {
-              const taken = reserved.has(slot);
-              const past = isPast(slot);
-              const active = selected.has(slot);
-              return (
-                <button
-                  key={slot}
-                  type="button"
-                  onClick={() => chooseSlot(slot)}
-                  disabled={past && !taken}
-                  className={`slot-button ${active ? 'slot-selected' : ''} ${taken && !active ? 'slot-taken' : ''}`}
-                  aria-pressed={active}
-                  aria-label={`${slotTime(slot)}, ${taken ? active ? 'selected to release' : 'reserved, select to release' : past ? 'past' : active ? 'selected to reserve' : 'available'}`}
-                >
-                  {active && slot === selection?.start ? <Check className="size-3" aria-hidden="true" /> : null}
-                  <span>{slotTime(slot)}</span>
-                  {taken ? <X className="size-3" aria-hidden="true" /> : null}
-                </button>
-              );
-            })}
-          </div>
+          <>
+            <div className="interval-fields">
+              <label>
+                <span>from</span>
+                <input type="time" step="60" value={selection ? inputTime(selection.start) : ''} onChange={(event) => changeStart(event.target.value)} aria-label="Reservation start time" />
+              </label>
+              <ArrowRight className="mb-3 size-4 text-muted-foreground" aria-hidden="true" />
+              <label>
+                <span>to</span>
+                <input type="time" step="60" value={selection ? inputTime(selection.end) : ''} onChange={(event) => changeEnd(event.target.value)} disabled={!selection} aria-label="Reservation end time" />
+              </label>
+            </div>
+
+            <div className="mt-7 space-y-7" aria-label="Time axis">
+              {OPEN_PERIODS.map((period) => {
+                const length = period.end - period.start;
+                return (
+                  <div key={period.start} className="axis-wrap">
+                    <div className="axis-labels" aria-hidden="true">
+                      {period.ticks.map((tick) => (
+                        <span key={tick} style={{ left: `${((tick - period.start) / length) * 100}%` }}>{minuteTime(tick)}</span>
+                      ))}
+                    </div>
+                    <div
+                      className="interval-axis"
+                      onPointerDown={(event) => startAxisSelection(event, period)}
+                      onPointerMove={(event) => moveAxisSelection(event, period)}
+                      onPointerUp={finishAxisSelection}
+                      onPointerCancel={finishAxisSelection}
+                      aria-label={`Select a time between ${minuteTime(period.start)} and ${minuteTime(period.end)}`}
+                    >
+                      {date === availability.today && availability.currentMinute > period.start && availability.currentMinute < period.end ? (
+                        <span className="axis-past" style={{ width: `${((availability.currentMinute - period.start) / length) * 100}%` }} />
+                      ) : null}
+                      {availability.reservedIntervals.map((item) => {
+                        const start = Math.max(item.start, period.start);
+                        const end = Math.min(item.end, period.end);
+                        if (end <= start) return null;
+                        return <span key={`${item.start}-${item.end}`} className="axis-reserved" style={{ left: `${((start - period.start) / length) * 100}%`, width: `${((end - start) / length) * 100}%` }} />;
+                      })}
+                      {selection && selection.start < period.end && selection.end > period.start ? (
+                        <span
+                          className={`axis-choice ${selectionState.mode === 'release' ? 'axis-choice-release' : ''} ${!selectionState.valid ? 'axis-choice-invalid' : ''}`}
+                          style={{
+                            left: `${((Math.max(selection.start, period.start) - period.start) / length) * 100}%`,
+                            width: `${((Math.min(selection.end, period.end) - Math.max(selection.start, period.start)) / length) * 100}%`,
+                          }}
+                        />
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </>
         )}
       </div>
 
       <div className="flex flex-col gap-3 border-t border-border bg-secondary/45 p-3 sm:flex-row sm:items-center sm:justify-between sm:p-4">
         <div className="min-w-0">
           <p className="font-heading text-lg tracking-tight">
-            {selection ? `${slotTime(selection.start)}–${slotTime(selection.end + 1)}` : 'nothing picked.'}
-            {selection ? <span className="ml-2 font-sans text-xs font-normal text-muted-foreground">{durationLabel}</span> : null}
+            {selection ? `${minuteTime(selection.start)}–${minuteTime(selection.end)}` : 'nothing picked.'}
+            {selection ? <span className="ml-2 font-sans text-xs font-normal text-muted-foreground">{durationLabel(selection.end - selection.start)}</span> : null}
           </p>
-          <p aria-live="polite" aria-atomic="true" className="mt-1 min-h-4 text-xs leading-4 text-muted-foreground">{message}</p>
+          <p aria-live="polite" aria-atomic="true" className="mt-1 min-h-4 text-xs leading-4 text-muted-foreground">
+            {selection && !selectionState.valid && !message ? 'that interval is not available.' : message}
+          </p>
         </div>
-        <button type="button" onClick={submitReservation} disabled={!selection || saving || loading} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg bg-primary px-5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card disabled:pointer-events-none disabled:opacity-35">
-          {saving ? <Loader2 className="animate-spin" /> : <>{selection?.mode === 'release' ? 'unreserve' : 'reserve'} <ArrowRight /></>}
+        <button type="button" onClick={submitReservation} disabled={!selection || !selectionState.valid || saving || loading} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg bg-primary px-5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card disabled:pointer-events-none disabled:opacity-35">
+          {saving ? <Loader2 className="animate-spin" /> : <>{selectionState.mode === 'release' ? 'unreserve' : 'reserve'} <ArrowRight /></>}
         </button>
       </div>
     </section>

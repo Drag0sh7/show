@@ -1,12 +1,7 @@
-import { listReservedSlots, releaseSlots, reserveSlots } from '@/db/reservations';
+import { listReservedIntervals, releaseInterval, reserveInterval } from '@/db/reservations';
 
 const TIME_ZONE = 'Europe/Berlin';
 const GITHUB_PAGES_ORIGIN = 'https://drag0sh7.github.io';
-const OPEN_SLOTS = new Set([
-  0,
-  1,
-  ...Array.from({ length: 38 }, (_, index) => index + 10),
-]);
 
 function json(data: unknown, init?: ResponseInit) {
   const response = Response.json(data, init);
@@ -45,47 +40,55 @@ function bookableWindow() {
   const tomorrowInstant = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day) + 1, 12));
   const tomorrowParts = berlinParts(tomorrowInstant);
   const tomorrow = `${tomorrowParts.year}-${tomorrowParts.month}-${tomorrowParts.day}`;
-  const currentSlot = Math.ceil((Number(parts.hour) * 60 + Number(parts.minute)) / 30);
-  return { today, tomorrow, currentSlot };
+  const currentMinute = Number(parts.hour) * 60 + Number(parts.minute);
+  return { today, tomorrow, currentMinute };
 }
 
 function dateIsBookable(date: string, today: string, tomorrow: string) {
   return date === today || date === tomorrow;
 }
 
-function slotsAreValid(slots: number[], date: string, today: string, currentSlot: number, allowPast = false) {
-  if (!slots.length || slots.length > 40 || new Set(slots).size !== slots.length) return false;
-  const ordered = [...slots].sort((a, b) => a - b);
-  if (!ordered.every((slot) => Number.isInteger(slot) && OPEN_SLOTS.has(slot))) return false;
-  if (ordered.some((slot, index) => index > 0 && slot !== ordered[index - 1] + 1)) return false;
-  if (!allowPast && date === today && ordered[0] < currentSlot) return false;
+function intervalIsOpen(start: number, end: number) {
+  return (start >= 0 && end <= 60) || (start >= 300 && end <= 1440);
+}
+
+function intervalIsValid(start: number, end: number, date: string, today: string, currentMinute: number, allowPast = false) {
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end > 1440 || end <= start) return false;
+  if (!intervalIsOpen(start, end)) return false;
+  if (!allowPast && date === today && start < currentMinute) return false;
   return true;
+}
+
+async function requestInterval(request: Request) {
+  const contentType = request.headers.get('content-type') ?? '';
+  if (!contentType.includes('application/json')) return null;
+  const body = (await request.json().catch(() => null)) as { date?: unknown; start?: unknown; end?: unknown } | null;
+  return {
+    date: typeof body?.date === 'string' ? body.date : '',
+    start: Number(body?.start),
+    end: Number(body?.end),
+  };
 }
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const date = url.searchParams.get('date') ?? '';
-  const { today, tomorrow, currentSlot } = bookableWindow();
+  const { today, tomorrow, currentMinute } = bookableWindow();
   if (!dateIsBookable(date, today, tomorrow)) {
     return json({ error: 'Choose today or tomorrow.' }, { status: 400 });
   }
-  const reservedSlots = await listReservedSlots(date, today);
-  return json({ reservedSlots, today, tomorrow, currentSlot: date === today ? currentSlot : 0 });
+  const reservedIntervals = await listReservedIntervals(date, today);
+  return json({ reservedIntervals, today, tomorrow, currentMinute: date === today ? currentMinute : 0 });
 }
 
 export async function POST(request: Request) {
-  const contentType = request.headers.get('content-type') ?? '';
-  if (!contentType.includes('application/json')) {
-    return json({ error: 'Invalid request.' }, { status: 415 });
-  }
-  const body = (await request.json().catch(() => null)) as { date?: unknown; slots?: unknown } | null;
-  const date = typeof body?.date === 'string' ? body.date : '';
-  const slots = Array.isArray(body?.slots) ? body.slots.map(Number) : [];
-  const { today, tomorrow, currentSlot } = bookableWindow();
-  if (!dateIsBookable(date, today, tomorrow) || !slotsAreValid(slots, date, today, currentSlot)) {
+  const interval = await requestInterval(request);
+  if (!interval) return json({ error: 'Invalid request.' }, { status: 415 });
+  const { today, tomorrow, currentMinute } = bookableWindow();
+  if (!dateIsBookable(interval.date, today, tomorrow) || !intervalIsValid(interval.start, interval.end, interval.date, today, currentMinute)) {
     return json({ error: 'That time is not available for booking.' }, { status: 400 });
   }
-  const created = await reserveSlots(date, slots);
+  const created = await reserveInterval(interval.date, interval.start, interval.end);
   if (!created) {
     return json({ error: 'Part of that time was just reserved. Please choose another.' }, { status: 409 });
   }
@@ -93,17 +96,12 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const contentType = request.headers.get('content-type') ?? '';
-  if (!contentType.includes('application/json')) {
-    return json({ error: 'Invalid request.' }, { status: 415 });
-  }
-  const body = (await request.json().catch(() => null)) as { date?: unknown; slots?: unknown } | null;
-  const date = typeof body?.date === 'string' ? body.date : '';
-  const slots = Array.isArray(body?.slots) ? body.slots.map(Number) : [];
-  const { today, tomorrow, currentSlot } = bookableWindow();
-  if (!dateIsBookable(date, today, tomorrow) || !slotsAreValid(slots, date, today, currentSlot, true)) {
+  const interval = await requestInterval(request);
+  if (!interval) return json({ error: 'Invalid request.' }, { status: 415 });
+  const { today, tomorrow, currentMinute } = bookableWindow();
+  if (!dateIsBookable(interval.date, today, tomorrow) || !intervalIsValid(interval.start, interval.end, interval.date, today, currentMinute, true)) {
     return json({ error: 'That time cannot be released.' }, { status: 400 });
   }
-  await releaseSlots(date, slots);
+  await releaseInterval(interval.date, interval.start, interval.end);
   return json({ ok: true });
 }
