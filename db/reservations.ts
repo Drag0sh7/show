@@ -41,3 +41,12 @@ export async function reserveSlots(date: string, slots: number[]) {
     throw error;
   }
 }
+
+export async function releaseSlots(date: string, slots: number[]) {
+  await ensureSchema();
+  const placeholders = slots.map(() => '?').join(', ');
+  await binding()
+    .prepare(`DELETE FROM reservations WHERE booking_date = ? AND slot IN (${placeholders})`)
+    .bind(date, ...slots)
+    .run();
+}

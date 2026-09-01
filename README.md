@@ -1,4 +1,4 @@
-# roomtime.
+# Reservations
 
 Anonymous shared room reservations in 30-minute increments for today and tomorrow.
 

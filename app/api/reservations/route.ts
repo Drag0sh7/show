@@ -1,4 +1,4 @@
-import { listReservedSlots, reserveSlots } from '@/db/reservations';
+import { listReservedSlots, releaseSlots, reserveSlots } from '@/db/reservations';
 
 const TIME_ZONE = 'Europe/Berlin';
 const OPEN_SLOTS = new Set([
@@ -30,12 +30,12 @@ function dateIsBookable(date: string, today: string, tomorrow: string) {
   return date === today || date === tomorrow;
 }
 
-function slotsAreValid(slots: number[], date: string, today: string, currentSlot: number) {
+function slotsAreValid(slots: number[], date: string, today: string, currentSlot: number, allowPast = false) {
   if (!slots.length || slots.length > 40 || new Set(slots).size !== slots.length) return false;
   const ordered = [...slots].sort((a, b) => a - b);
   if (!ordered.every((slot) => Number.isInteger(slot) && OPEN_SLOTS.has(slot))) return false;
   if (ordered.some((slot, index) => index > 0 && slot !== ordered[index - 1] + 1)) return false;
-  if (date === today && ordered[0] < currentSlot) return false;
+  if (!allowPast && date === today && ordered[0] < currentSlot) return false;
   return true;
 }
 
@@ -67,4 +67,20 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Part of that time was just reserved. Please choose another.' }, { status: 409 });
   }
   return Response.json({ ok: true }, { status: 201 });
+}
+
+export async function DELETE(request: Request) {
+  const contentType = request.headers.get('content-type') ?? '';
+  if (!contentType.includes('application/json')) {
+    return Response.json({ error: 'Invalid request.' }, { status: 415 });
+  }
+  const body = (await request.json().catch(() => null)) as { date?: unknown; slots?: unknown } | null;
+  const date = typeof body?.date === 'string' ? body.date : '';
+  const slots = Array.isArray(body?.slots) ? body.slots.map(Number) : [];
+  const { today, tomorrow, currentSlot } = bookableWindow();
+  if (!dateIsBookable(date, today, tomorrow) || !slotsAreValid(slots, date, today, currentSlot, true)) {
+    return Response.json({ error: 'That time cannot be released.' }, { status: 400 });
+  }
+  await releaseSlots(date, slots);
+  return Response.json({ ok: true });
 }

@@ -58,14 +58,14 @@
   * { @apply border-border outline-ring/50; }
   html { @apply bg-background font-sans; }
   body {
-    @apply bg-background text-foreground;
+    @apply overflow-x-hidden bg-background text-foreground;
     background-image: radial-gradient(circle at 50% -20%, rgb(177 255 71 / 7%), transparent 38%);
   }
 }
 
 @layer components {
   .slot-button {
-    @apply flex min-h-11 items-center justify-center gap-1 rounded-lg border border-border bg-background px-2 py-2 text-xs font-medium tabular-nums transition-colors hover:border-primary/50 hover:text-primary focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-35;
+    @apply flex min-h-11 items-center justify-center gap-1 rounded-lg border border-border bg-background px-1.5 py-2 text-xs font-medium tabular-nums transition-colors hover:border-primary/50 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-35 sm:px-2;
   }
 
   .slot-selected {
