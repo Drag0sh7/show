@@ -1,4 +1,5 @@
 import { listReservedIntervals, releaseInterval, reserveInterval } from '@/db/reservations';
+import type { Room } from '@/db/reservations';
 
 const TIME_ZONE = 'Europe/Berlin';
 const GITHUB_PAGES_ORIGIN = 'https://drag0sh7.github.io';
@@ -48,6 +49,10 @@ function dateIsBookable(date: string, today: string, tomorrow: string) {
   return date === today || date === tomorrow;
 }
 
+function selectedRoom(value: unknown): Room | null {
+  return value === 'left' || value === 'right' ? value : null;
+}
+
 function intervalIsOpen(start: number, end: number) {
   return (start >= 0 && end <= 60) || (start >= 300 && end <= 1440);
 }
@@ -62,9 +67,10 @@ function intervalIsValid(start: number, end: number, date: string, today: string
 async function requestInterval(request: Request) {
   const contentType = request.headers.get('content-type') ?? '';
   if (!contentType.includes('application/json')) return null;
-  const body = (await request.json().catch(() => null)) as { date?: unknown; start?: unknown; end?: unknown } | null;
+  const body = (await request.json().catch(() => null)) as { date?: unknown; room?: unknown; start?: unknown; end?: unknown } | null;
   return {
     date: typeof body?.date === 'string' ? body.date : '',
+    room: selectedRoom(body?.room) ?? 'left',
     start: Number(body?.start),
     end: Number(body?.end),
   };
@@ -73,12 +79,13 @@ async function requestInterval(request: Request) {
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const date = url.searchParams.get('date') ?? '';
+  const room = selectedRoom(url.searchParams.get('room')) ?? 'left';
   const { today, tomorrow, currentMinute } = bookableWindow();
   if (!dateIsBookable(date, today, tomorrow)) {
     return json({ error: 'Choose today or tomorrow.' }, { status: 400 });
   }
-  const reservedIntervals = await listReservedIntervals(date, today);
-  return json({ reservedIntervals, today, tomorrow, currentMinute: date === today ? currentMinute : 0 });
+  const reservedIntervals = await listReservedIntervals(date, today, room);
+  return json({ reservedIntervals, today, tomorrow, currentMinute: date === today ? currentMinute : 0, room });
 }
 
 export async function POST(request: Request) {
@@ -88,7 +95,7 @@ export async function POST(request: Request) {
   if (!dateIsBookable(interval.date, today, tomorrow) || !intervalIsValid(interval.start, interval.end, interval.date, today, currentMinute)) {
     return json({ error: 'That time is not available for booking.' }, { status: 400 });
   }
-  const created = await reserveInterval(interval.date, interval.start, interval.end);
+  const created = await reserveInterval(interval.date, interval.start, interval.end, interval.room);
   if (!created) {
     return json({ error: 'Part of that time was just reserved. Please choose another.' }, { status: 409 });
   }
@@ -102,6 +109,6 @@ export async function DELETE(request: Request) {
   if (!dateIsBookable(interval.date, today, tomorrow) || !intervalIsValid(interval.start, interval.end, interval.date, today, currentMinute, true)) {
     return json({ error: 'That time cannot be released.' }, { status: 400 });
   }
-  await releaseInterval(interval.date, interval.start, interval.end);
+  await releaseInterval(interval.date, interval.start, interval.end, interval.room);
   return json({ ok: true });
 }

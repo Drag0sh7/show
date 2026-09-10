@@ -12,6 +12,7 @@
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
+  --color-occupied: var(--occupied);
   --color-destructive: var(--destructive);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
@@ -51,6 +52,7 @@
   --border: oklch(0.285 0.012 220);
   --input: oklch(0.285 0.012 220);
   --ring: oklch(0.86 0.17 120);
+  --occupied: oklch(0.72 0.14 52);
   --radius: 0.75rem;
 }
 
@@ -64,8 +66,36 @@
 }
 
 @layer components {
+  .booking-toolbar {
+    @apply flex flex-wrap items-center gap-2 border-b border-border p-3 sm:p-4;
+  }
+
+  .segmented-control {
+    @apply flex rounded-xl bg-secondary p-1 text-sm font-medium;
+  }
+
+  .segmented-control button {
+    @apply min-h-10 rounded-lg px-3 py-1.5 text-muted-foreground transition hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring;
+  }
+
+  .segmented-control button[aria-pressed='true'] {
+    @apply bg-foreground text-background shadow-sm;
+  }
+
+  .segmented-control small {
+    @apply ml-1.5 hidden font-normal opacity-55 sm:inline;
+  }
+
+  .room-control button {
+    @apply min-w-16;
+  }
+
+  .refresh-button {
+    @apply ml-auto grid size-10 place-items-center rounded-lg text-muted-foreground transition hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring;
+  }
+
   .interval-fields {
-    @apply flex items-end gap-2 sm:max-w-sm;
+    @apply grid max-w-md grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-end gap-2;
   }
 
   .interval-fields label {
@@ -78,11 +108,47 @@
 
   .interval-fields input {
     @apply min-h-11 w-full rounded-lg border border-border bg-background px-3 text-sm font-medium tabular-nums text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-ring/35 disabled:opacity-35;
-    color-scheme: dark;
+  }
+
+  .quick-durations {
+    @apply mt-2 flex flex-wrap gap-1.5;
+  }
+
+  .quick-durations button {
+    @apply min-h-8 rounded-md border border-border bg-background px-3 text-[11px] font-medium text-muted-foreground transition hover:border-primary/60 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-30;
+  }
+
+  .axis-legend {
+    @apply mt-5 flex items-center gap-4 text-[10px] uppercase tracking-[0.12em] text-muted-foreground;
+  }
+
+  .axis-legend span {
+    @apply inline-flex items-center gap-1.5;
+  }
+
+  .axis-legend i {
+    @apply block size-2.5 rounded-sm;
+  }
+
+  .occupied-swatch {
+    @apply bg-occupied;
+  }
+
+  .past-swatch {
+    @apply border border-border bg-secondary;
+    background-image: repeating-linear-gradient(135deg, transparent 0 3px, rgb(255 255 255 / 8%) 3px 4px);
+  }
+
+  .axes {
+    @apply mt-4 space-y-6;
   }
 
   .axis-wrap {
     @apply relative pt-5;
+  }
+
+  .axis-compact {
+    width: min(100%, 14rem);
   }
 
   .axis-labels {
@@ -102,9 +168,9 @@
   }
 
   .interval-axis {
-    @apply relative h-12 cursor-crosshair touch-none overflow-hidden rounded-xl border border-border bg-background select-none;
+    @apply relative block h-14 w-full cursor-crosshair touch-none overflow-hidden rounded-xl border border-border bg-background p-0 text-left select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring;
     background-image: linear-gradient(to right, transparent calc(100% - 1px), color-mix(in oklab, var(--border) 55%, transparent) 100%);
-    background-size: 12.5% 100%;
+    background-size: 25% 100%;
   }
 
   .interval-axis::after {
@@ -119,12 +185,14 @@
   }
 
   .axis-past {
-    @apply left-0 bg-secondary/50;
+    @apply left-0 z-[5] flex items-center justify-center overflow-hidden rounded-l-lg bg-secondary/80 text-[9px] uppercase tracking-wider text-muted-foreground;
+    background-image: repeating-linear-gradient(135deg, transparent 0 7px, rgb(255 255 255 / 4%) 7px 9px);
   }
 
   .axis-reserved {
-    @apply z-10 bg-muted-foreground/30;
-    background-image: repeating-linear-gradient(135deg, transparent 0 5px, rgb(255 255 255 / 5%) 5px 7px);
+    @apply z-10 border border-occupied bg-occupied/75;
+    background-image: repeating-linear-gradient(135deg, transparent 0 6px, rgb(20 24 25 / 16%) 6px 8px);
+    box-shadow: 0 0 18px rgb(226 140 65 / 12%);
   }
 
   .axis-choice {
@@ -147,10 +215,46 @@
   }
 
   .axis-choice-release {
-    @apply bg-muted-foreground outline outline-1 outline-primary;
+    @apply bg-occupied outline outline-2 outline-primary;
   }
 
   .axis-choice-invalid {
     @apply bg-destructive/60 outline outline-1 outline-destructive;
+  }
+
+  .axis-now {
+    @apply pointer-events-none absolute inset-y-0 z-30 w-px bg-foreground/80;
+  }
+
+  .axis-now i {
+    @apply absolute left-1/2 top-1 -translate-x-1/2 rounded bg-foreground px-1 py-0.5 text-[8px] font-semibold not-italic uppercase tracking-wider text-background;
+  }
+
+  .occupied-list {
+    @apply mt-6 border-t border-border pt-3;
+  }
+
+  .occupied-list > span {
+    @apply text-[10px] uppercase tracking-[0.16em] text-muted-foreground;
+  }
+
+  .occupied-list > div {
+    @apply mt-2 flex flex-wrap gap-1.5;
+  }
+
+  .occupied-list button {
+    @apply inline-flex min-h-9 items-center gap-2 rounded-lg border border-occupied/35 bg-occupied/10 px-3 text-xs font-medium tabular-nums text-foreground transition hover:border-occupied hover:bg-occupied/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring;
+  }
+
+  .occupied-list button i {
+    @apply size-2 rounded-sm bg-occupied;
+  }
+
+  .booking-footer {
+    @apply flex flex-col gap-3 border-t border-border bg-secondary/45 p-3 sm:flex-row sm:items-center sm:justify-between sm:p-4;
+  }
+
+  .submit-button {
+    @apply inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg bg-primary px-5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card disabled:pointer-events-none disabled:bg-secondary disabled:text-muted-foreground disabled:opacity-100;
   }
 }

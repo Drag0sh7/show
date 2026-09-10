@@ -8,6 +8,13 @@
       "when": 1788248838960,
       "tag": "0000_great_hannibal_king",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1789018714804,
+      "tag": "0002_room_reservations",
+      "breakpoints": true
     }
   ]
 }

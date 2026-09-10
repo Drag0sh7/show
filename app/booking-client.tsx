@@ -4,18 +4,28 @@ import { useEffect, useMemo, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { ArrowRight, Loader2, RefreshCw } from 'lucide-react';
 
+type Room = 'left' | 'right';
 type ReservedInterval = { start: number; end: number };
 type Selection = ReservedInterval;
+type AxisSection = { start: number; end: number; ticks: number[] };
 type Availability = {
   reservedIntervals: ReservedInterval[];
   today: string;
   tomorrow: string;
   currentMinute: number;
+  room?: Room;
 };
 
-const OPEN_PERIODS = [
-  { start: 0, end: 60, ticks: [0, 60] },
-  { start: 300, end: 1440, ticks: [300, 480, 660, 840, 1020, 1200, 1380, 1440] },
+const BOOKABLE_PERIODS = [
+  { start: 0, end: 60 },
+  { start: 300, end: 1440 },
+];
+
+const AXIS_SECTIONS: AxisSection[] = [
+  { start: 0, end: 60, ticks: [0, 30, 60] },
+  { start: 300, end: 720, ticks: [300, 420, 540, 660, 720] },
+  { start: 720, end: 1080, ticks: [720, 840, 960, 1080] },
+  { start: 1080, end: 1440, ticks: [1080, 1200, 1320, 1440] },
 ];
 
 function minuteTime(minute: number) {
@@ -23,14 +33,12 @@ function minuteTime(minute: number) {
   return `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
 }
 
-function inputTime(minute: number) {
-  return minute === 1440 ? '00:00' : minuteTime(minute);
-}
-
-function parsedTime(value: string) {
-  const [hour, minute] = value.split(':').map(Number);
-  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
-  return hour * 60 + minute;
+function parsedTime(value: string, allowEndOfDay = false) {
+  const normalized = value.trim();
+  if (allowEndOfDay && normalized === '24:00') return 1440;
+  const match = normalized.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if (!match) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
 }
 
 function dateLabel(date: string, fallback: string) {
@@ -40,7 +48,7 @@ function dateLabel(date: string, fallback: string) {
 }
 
 function openPeriod(start: number, end = start + 1) {
-  return OPEN_PERIODS.find((period) => start >= period.start && end <= period.end);
+  return BOOKABLE_PERIODS.find((period) => start >= period.start && end <= period.end);
 }
 
 function durationLabel(minutes: number) {
@@ -50,8 +58,37 @@ function durationLabel(minutes: number) {
   return rest ? `${hours}h ${rest}m` : `${hours}h`;
 }
 
+function TimeField({ label, value, disabled = false, onCommit }: { label: string; value: string; disabled?: boolean; onCommit: (value: string) => boolean }) {
+  const [draft, setDraft] = useState(value);
+  function commit() {
+    if (!onCommit(draft)) setDraft(value);
+  }
+  return (
+    <label>
+      <span>{label}</span>
+      <input
+        type="text"
+        inputMode="numeric"
+        autoComplete="off"
+        maxLength={5}
+        placeholder="--:--"
+        value={draft}
+        disabled={disabled}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') event.currentTarget.blur();
+          if (event.key === 'Escape') { setDraft(value); event.currentTarget.blur(); }
+        }}
+        aria-label={`${label} time, 24-hour format`}
+      />
+    </label>
+  );
+}
+
 export function BookingClient({ initialToday, initialTomorrow, apiBase = '' }: { initialToday: string; initialTomorrow: string; apiBase?: string }) {
   const [date, setDate] = useState(initialToday);
+  const [room, setRoom] = useState<Room>('left');
   const [availability, setAvailability] = useState<Availability>({ reservedIntervals: [], today: initialToday, tomorrow: initialTomorrow, currentMinute: 0 });
   const [selection, setSelection] = useState<Selection | null>(null);
   const [dragStart, setDragStart] = useState<number | null>(null);
@@ -60,19 +97,28 @@ export function BookingClient({ initialToday, initialTomorrow, apiBase = '' }: {
   const [message, setMessage] = useState('');
 
   const selectionState = useMemo(() => {
-    if (!selection) return { mode: null as 'reserve' | 'release' | null, valid: false };
+    if (!selection) return { mode: null as 'reserve' | 'release' | null, valid: false, reason: '' };
     const containing = availability.reservedIntervals.find((item) => selection.start >= item.start && selection.end <= item.end);
-    if (containing) return { mode: 'release' as const, valid: true };
-    const overlaps = availability.reservedIntervals.some((item) => selection.start < item.end && selection.end > item.start);
-    const past = date === availability.today && selection.start < availability.currentMinute;
-    return { mode: 'reserve' as const, valid: !overlaps && !past && Boolean(openPeriod(selection.start, selection.end)) };
+    if (containing) return { mode: 'release' as const, valid: true, reason: '' };
+    if (!openPeriod(selection.start, selection.end)) {
+      return { mode: 'reserve' as const, valid: false, reason: 'outside opening hours.' };
+    }
+    if (date === availability.today && selection.start < availability.currentMinute) {
+      return { mode: 'reserve' as const, valid: false, reason: `already passed. now ${minuteTime(availability.currentMinute)}.` };
+    }
+    const collision = availability.reservedIntervals.find((item) => selection.start < item.end && selection.end > item.start);
+    if (collision) {
+      return { mode: 'reserve' as const, valid: false, reason: `${minuteTime(collision.start)}–${minuteTime(collision.end)} is occupied.` };
+    }
+    return { mode: 'reserve' as const, valid: true, reason: '' };
   }, [availability, date, selection]);
 
-  async function loadAvailability(targetDate = date, keepMessage = false) {
+  async function loadAvailability(targetDate = date, targetRoom = room, keepMessage = false) {
     setLoading(true);
     if (!keepMessage) setMessage('');
     try {
-      const response = await fetch(`${apiBase}/api/reservations?date=${encodeURIComponent(targetDate)}`, { cache: 'no-store' });
+      const query = new URLSearchParams({ date: targetDate, room: targetRoom });
+      const response = await fetch(`${apiBase}/api/reservations?${query}`, { cache: 'no-store' });
       const data = (await response.json()) as Availability & { error?: string };
       if (!response.ok) throw new Error(data.error ?? 'could not load. awkward.');
       setAvailability(data);
@@ -83,16 +129,28 @@ export function BookingClient({ initialToday, initialTomorrow, apiBase = '' }: {
     }
   }
 
-  useEffect(() => { void loadAvailability(date); }, [date]);
+  useEffect(() => { void loadAvailability(date, room); }, [date, room]);
 
-  function minuteFromPointer(event: ReactPointerEvent<HTMLDivElement>, period: (typeof OPEN_PERIODS)[number]) {
-    const bounds = event.currentTarget.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
-    return Math.round(period.start + ratio * (period.end - period.start));
+  function switchDate(nextDate: string) {
+    setSelection(null);
+    setMessage('');
+    setDate(nextDate);
   }
 
-  function startAxisSelection(event: ReactPointerEvent<HTMLDivElement>, period: (typeof OPEN_PERIODS)[number]) {
-    const pointedMinute = Math.min(period.end - 1, minuteFromPointer(event, period));
+  function switchRoom(nextRoom: Room) {
+    setSelection(null);
+    setMessage('');
+    setRoom(nextRoom);
+  }
+
+  function minuteFromPointer(event: ReactPointerEvent<HTMLElement>, section: AxisSection) {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width));
+    return Math.round(section.start + ratio * (section.end - section.start));
+  }
+
+  function startAxisSelection(event: ReactPointerEvent<HTMLButtonElement>, section: AxisSection) {
+    const pointedMinute = Math.min(section.end - 1, minuteFromPointer(event, section));
     const reservedInterval = availability.reservedIntervals.find((item) => pointedMinute >= item.start && pointedMinute < item.end);
     setMessage('');
     if (reservedInterval) {
@@ -100,46 +158,73 @@ export function BookingClient({ initialToday, initialTomorrow, apiBase = '' }: {
       setDragStart(null);
       return;
     }
-    if (date === availability.today && pointedMinute < availability.currentMinute) return;
+    if (date === availability.today && pointedMinute < availability.currentMinute) {
+      setSelection(null);
+      setMessage(`already passed. now ${minuteTime(availability.currentMinute)}.`);
+      return;
+    }
     event.currentTarget.setPointerCapture(event.pointerId);
     setDragStart(pointedMinute);
     setSelection({ start: pointedMinute, end: pointedMinute + 1 });
   }
 
-  function moveAxisSelection(event: ReactPointerEvent<HTMLDivElement>, period: (typeof OPEN_PERIODS)[number]) {
+  function moveAxisSelection(event: ReactPointerEvent<HTMLButtonElement>, section: AxisSection) {
     if (dragStart === null) return;
-    const pointedMinute = minuteFromPointer(event, period);
+    const pointedMinute = minuteFromPointer(event, section);
     if (pointedMinute >= dragStart) {
-      setSelection({ start: dragStart, end: Math.min(period.end, Math.max(dragStart + 1, pointedMinute)) });
+      setSelection({ start: dragStart, end: Math.min(section.end, Math.max(dragStart + 1, pointedMinute)) });
     } else {
-      setSelection({ start: Math.max(period.start, pointedMinute), end: dragStart + 1 });
+      setSelection({ start: Math.max(section.start, pointedMinute), end: dragStart + 1 });
     }
   }
 
-  function finishAxisSelection(event: ReactPointerEvent<HTMLDivElement>) {
+  function finishAxisSelection(event: ReactPointerEvent<HTMLButtonElement>) {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     setDragStart(null);
   }
 
   function changeStart(value: string) {
     const start = parsedTime(value);
-    if (start === null) return;
-    const period = OPEN_PERIODS.find((item) => start >= item.start && start < item.end);
+    if (start === null) {
+      setMessage('use 24h format: 17:30.');
+      return false;
+    }
+    const period = BOOKABLE_PERIODS.find((item) => start >= item.start && start < item.end);
     if (!period) {
-      setMessage('not available.');
-      return;
+      setMessage('outside opening hours.');
+      return false;
+    }
+    if (date === availability.today && start < availability.currentMinute) {
+      setMessage(`already passed. now ${minuteTime(availability.currentMinute)}.`);
+      return false;
     }
     const end = selection && selection.end > start && selection.end <= period.end ? selection.end : Math.min(period.end, start + 30);
     setSelection({ start, end });
     setMessage('');
+    return true;
   }
 
   function changeEnd(value: string) {
+    if (!selection) return false;
+    const end = parsedTime(value, true);
+    if (end === null) {
+      setMessage('use 24h format: 18:15.');
+      return false;
+    }
+    if (end <= selection.start || !openPeriod(selection.start, end)) {
+      setMessage('outside opening hours.');
+      return false;
+    }
+    setSelection({ ...selection, end });
+    setMessage('');
+    return true;
+  }
+
+  function setDuration(minutes: number) {
     if (!selection) return;
-    let end = parsedTime(value);
-    if (end === 0 && selection.start >= 300) end = 1440;
-    if (end === null || end <= selection.start || !openPeriod(selection.start, end)) {
-      setMessage('not available.');
+    const end = selection.start + minutes;
+    if (!openPeriod(selection.start, end)) {
+      setMessage('outside opening hours.');
       return;
     }
     setSelection({ ...selection, end });
@@ -154,7 +239,7 @@ export function BookingClient({ initialToday, initialTomorrow, apiBase = '' }: {
       const response = await fetch(`${apiBase}/api/reservations`, {
         method: selectionState.mode === 'release' ? 'DELETE' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date, start: selection.start, end: selection.end }),
+        body: JSON.stringify({ date, room, start: selection.start, end: selection.end }),
       });
       const data = (await response.json()) as { ok?: boolean; error?: string };
       if (!response.ok) throw new Error(data.error ?? 'that did not work.');
@@ -162,10 +247,10 @@ export function BookingClient({ initialToday, initialTomorrow, apiBase = '' }: {
       const completedMode = selectionState.mode;
       setSelection(null);
       setMessage(`${label}. ${completedMode === 'release' ? 'released.' : 'booked.'}`);
-      await loadAvailability(date, true);
+      await loadAvailability(date, room, true);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'that did not work.');
-      await loadAvailability(date, true);
+      await loadAvailability(date, room, true);
     } finally {
       setSaving(false);
     }
@@ -173,103 +258,124 @@ export function BookingClient({ initialToday, initialTomorrow, apiBase = '' }: {
 
   return (
     <section id="booking" aria-label="Reservation times" className="overflow-hidden rounded-2xl border border-border bg-card">
-      <div className="flex items-center justify-between gap-4 border-b border-border p-3 sm:p-4">
-        <div className="flex rounded-xl bg-secondary p-1 text-sm font-medium">
+      <div className="booking-toolbar">
+        <div className="segmented-control" aria-label="Day">
           {[availability.today, availability.tomorrow].map((item, index) => (
-            <button
-              key={item}
-              type="button"
-              onClick={() => { setSelection(null); setDate(item); }}
-              className={`min-h-11 rounded-lg px-3 py-2 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-w-32 ${date === item ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground'}`}
-              aria-pressed={date === item}
-            >
-              <span className="mr-1.5">{index === 0 ? 'today' : 'tomorrow'}</span>
-              <span className="hidden opacity-55 sm:inline">{dateLabel(item, '')}</span>
+            <button key={item} type="button" onClick={() => switchDate(item)} aria-pressed={date === item}>
+              <span>{index === 0 ? 'today' : 'tomorrow'}</span>
+              <small>{dateLabel(item, '')}</small>
             </button>
           ))}
         </div>
-        <button type="button" onClick={() => loadAvailability(date)} className="grid size-11 place-items-center rounded-lg text-muted-foreground hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Refresh availability">
+        <div className="segmented-control room-control" aria-label="Room">
+          {(['left', 'right'] as const).map((item) => (
+            <button key={item} type="button" onClick={() => switchRoom(item)} aria-pressed={room === item}>{item}</button>
+          ))}
+        </div>
+        <button type="button" onClick={() => loadAvailability(date, room)} className="refresh-button" aria-label="Refresh availability">
           <RefreshCw className={`size-3.5 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
       <div className="p-3 sm:p-4">
         {loading ? (
-          <div className="grid min-h-72 place-items-center text-xs text-muted-foreground" role="status">
+          <output className="grid min-h-72 place-items-center text-xs text-muted-foreground">
             <span className="sr-only">Loading availability</span>
             <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-          </div>
+          </output>
         ) : (
           <>
             <div className="interval-fields">
-              <label>
-                <span>from</span>
-                <input type="time" step="60" value={selection ? inputTime(selection.start) : ''} onChange={(event) => changeStart(event.target.value)} aria-label="Reservation start time" />
-              </label>
-              <ArrowRight className="mb-3 size-4 text-muted-foreground" aria-hidden="true" />
-              <label>
-                <span>to</span>
-                <input type="time" step="60" value={selection ? inputTime(selection.end) : ''} onChange={(event) => changeEnd(event.target.value)} disabled={!selection} aria-label="Reservation end time" />
-              </label>
+              <TimeField key={`start-${selection?.start ?? 'empty'}`} label="from" value={selection ? minuteTime(selection.start) : ''} onCommit={changeStart} />
+              <ArrowRight className="mb-3 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+              <TimeField key={`end-${selection?.end ?? 'empty'}`} label="to" value={selection ? minuteTime(selection.end) : ''} disabled={!selection} onCommit={changeEnd} />
             </div>
 
-            <div className="mt-7 space-y-7" aria-label="Time axis">
-              {OPEN_PERIODS.map((period) => {
-                const length = period.end - period.start;
+            <div className="quick-durations" aria-label="Quick duration">
+              {[15, 30, 60, 120].map((minutes) => (
+                <button key={minutes} type="button" onClick={() => setDuration(minutes)} disabled={!selection}>
+                  {minutes < 60 ? `${minutes}m` : `${minutes / 60}h`}
+                </button>
+              ))}
+            </div>
+
+            <div className="axis-legend" aria-hidden="true">
+              <span><i className="occupied-swatch" /> occupied</span>
+              {date === availability.today ? <span><i className="past-swatch" /> past</span> : null}
+            </div>
+
+            <div className="axes" aria-label={`${room} room timetable`}>
+              {AXIS_SECTIONS.map((section) => {
+                const length = section.end - section.start;
+                const pastMinutes = date === availability.today ? Math.max(0, Math.min(length, availability.currentMinute - section.start)) : 0;
+                const hasNow = date === availability.today && availability.currentMinute >= section.start && availability.currentMinute < section.end;
                 return (
-                  <div key={period.start} className="axis-wrap">
+                  <div key={section.start} className={`axis-wrap ${length === 60 ? 'axis-compact' : ''}`}>
                     <div className="axis-labels" aria-hidden="true">
-                      {period.ticks.map((tick) => (
-                        <span key={tick} style={{ left: `${((tick - period.start) / length) * 100}%` }}>{minuteTime(tick)}</span>
+                      {section.ticks.map((tick) => (
+                        <span key={tick} style={{ left: `${((tick - section.start) / length) * 100}%` }}>{minuteTime(tick)}</span>
                       ))}
                     </div>
-                    <div
+                    <button
+                      type="button"
                       className="interval-axis"
-                      onPointerDown={(event) => startAxisSelection(event, period)}
-                      onPointerMove={(event) => moveAxisSelection(event, period)}
+                      onPointerDown={(event) => startAxisSelection(event, section)}
+                      onPointerMove={(event) => moveAxisSelection(event, section)}
                       onPointerUp={finishAxisSelection}
                       onPointerCancel={finishAxisSelection}
-                      aria-label={`Select a time between ${minuteTime(period.start)} and ${minuteTime(period.end)}`}
+                      aria-label={`Choose a time between ${minuteTime(section.start)} and ${minuteTime(section.end)}`}
                     >
-                      {date === availability.today && availability.currentMinute > period.start && availability.currentMinute < period.end ? (
-                        <span className="axis-past" style={{ width: `${((availability.currentMinute - period.start) / length) * 100}%` }} />
-                      ) : null}
+                      {pastMinutes > 0 ? <span className="axis-past" style={{ width: `${(pastMinutes / length) * 100}%` }}>{pastMinutes / length > 0.22 ? 'past' : ''}</span> : null}
                       {availability.reservedIntervals.map((item) => {
-                        const start = Math.max(item.start, period.start);
-                        const end = Math.min(item.end, period.end);
+                        const start = Math.max(item.start, section.start);
+                        const end = Math.min(item.end, section.end);
                         if (end <= start) return null;
-                        return <span key={`${item.start}-${item.end}`} className="axis-reserved" style={{ left: `${((start - period.start) / length) * 100}%`, width: `${((end - start) / length) * 100}%` }} />;
+                        return <span key={`${item.start}-${item.end}`} className="axis-reserved" title={`${minuteTime(item.start)}–${minuteTime(item.end)} occupied`} style={{ left: `${((start - section.start) / length) * 100}%`, width: `${((end - start) / length) * 100}%` }} />;
                       })}
-                      {selection && selection.start < period.end && selection.end > period.start ? (
+                      {selection && selection.start < section.end && selection.end > section.start ? (
                         <span
                           className={`axis-choice ${selectionState.mode === 'release' ? 'axis-choice-release' : ''} ${!selectionState.valid ? 'axis-choice-invalid' : ''}`}
                           style={{
-                            left: `${((Math.max(selection.start, period.start) - period.start) / length) * 100}%`,
-                            width: `${((Math.min(selection.end, period.end) - Math.max(selection.start, period.start)) / length) * 100}%`,
+                            left: `${((Math.max(selection.start, section.start) - section.start) / length) * 100}%`,
+                            width: `${((Math.min(selection.end, section.end) - Math.max(selection.start, section.start)) / length) * 100}%`,
                           }}
                         />
                       ) : null}
-                    </div>
+                      {hasNow ? <span className="axis-now" style={{ left: `${((availability.currentMinute - section.start) / length) * 100}%` }}><i>now</i></span> : null}
+                    </button>
                   </div>
                 );
               })}
             </div>
+
+            {availability.reservedIntervals.length ? (
+              <div className="occupied-list">
+                <span>occupied</span>
+                <div>
+                  {availability.reservedIntervals.map((item) => (
+                    <button key={`${item.start}-${item.end}`} type="button" onClick={() => { setSelection({ ...item }); setMessage(''); }}>
+                      <i /> {minuteTime(item.start)}–{minuteTime(item.end)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </>
         )}
       </div>
 
-      <div className="flex flex-col gap-3 border-t border-border bg-secondary/45 p-3 sm:flex-row sm:items-center sm:justify-between sm:p-4">
+      <div className="booking-footer">
         <div className="min-w-0">
           <p className="font-heading text-lg tracking-tight">
-            {selection ? `${minuteTime(selection.start)}–${minuteTime(selection.end)}` : 'nothing picked.'}
+            {selection ? `${minuteTime(selection.start)}–${minuteTime(selection.end)}` : `${room}. nothing picked.`}
             {selection ? <span className="ml-2 font-sans text-xs font-normal text-muted-foreground">{durationLabel(selection.end - selection.start)}</span> : null}
           </p>
           <p aria-live="polite" aria-atomic="true" className="mt-1 min-h-4 text-xs leading-4 text-muted-foreground">
-            {selection && !selectionState.valid && !message ? 'that interval is not available.' : message}
+            {message || selectionState.reason}
           </p>
         </div>
-        <button type="button" onClick={submitReservation} disabled={!selection || !selectionState.valid || saving || loading} className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-lg bg-primary px-5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card disabled:pointer-events-none disabled:opacity-35">
-          {saving ? <Loader2 className="animate-spin" /> : <>{selectionState.mode === 'release' ? 'unreserve' : 'reserve'} <ArrowRight /></>}
+        <button type="button" onClick={submitReservation} disabled={!selection || !selectionState.valid || saving || loading} className="submit-button">
+          {saving ? <Loader2 className="animate-spin" /> : <>{selection && !selectionState.valid ? 'unavailable' : selectionState.mode === 'release' ? 'unreserve' : 'reserve'} <ArrowRight /></>}
         </button>
       </div>
     </section>
